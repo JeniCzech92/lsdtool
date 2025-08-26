@@ -286,7 +286,7 @@ fi
 has_command java "Please install JDK."
 has_command jar "Please install JDK, JRE is nice, but not sufficient."
 has_command perl "Please install perl."
-has_command ldd "Make sure lib32-gcc-libs / libc6:i386 is installed."
+has_command ldd
 has_command file
 
 getjdk "${SCRIPT_DIR}"
