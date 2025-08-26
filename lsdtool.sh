@@ -12,6 +12,9 @@ SCRIPT_DIR="$(dirname "${SOURCE}")"
 
 JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-pxi3260sr4ifx.zip"
 
+CONTAINER_IMAGE_ID="${SCRIPT_DIR}/utils/.container-image-id"
+CONTAINER_IMAGE_RECIPIE="${SCRIPT_DIR}/Dockerfile"
+
 print_help() {
     cat <<EOF
 Usage: $0 [OPTIONS] [SOURCE] [DESTINATION] [CLASSPATH]
@@ -31,6 +34,7 @@ Options:
        [CLASSPATH]       Original jar file, default lsd.jar
   -n, --nocleanup        Skip cleanup during build (may cause build failure)
   -i, --install          lsdtool can be portable, but it can also be installed
+  -d, --docker           run the toolchain inside docker - default on mac, not available on windows, optional on linux
 EOF
 }
 
@@ -75,6 +79,36 @@ d_exists() {
     fi
 }
 
+# TODO add support for apple containers
+container_prepare() {
+    has_command docker
+    if [[ -e "${CONTAINER_IMAGE_ID}" ]] && [[ "${CONTAINER_IMAGE_RECIPIE}" -ot "${CONTAINER_IMAGE_ID}" ]]; then
+        return 0
+    fi
+
+    docker build --platform linux/amd64 -f "${CONTAINER_IMAGE_RECIPIE}" --iidfile "${CONTAINER_IMAGE_ID}" .
+}
+
+x86() {
+    # Takes parameters as "paths to map" until '--' and treats rest like a command
+    local -a paths=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--" ]]; then
+            shift
+            break
+        else
+            paths+=("-v ${1}:${1}")
+            shift
+        fi
+    done
+
+    if "${CONTENERIZED}"; then
+        docker run --platform linux/amd64 --rm -it ${paths[*]} -v "${SCRIPT_DIR}":/opt/lsdtool --workdir /opt/lsdtool "$(cat "${CONTAINER_IMAGE_ID}")" "${@}"
+    else
+        "${@}"
+    fi
+}
+
 getjdk() {
     local target="${1:-}"
     if [[ -z "${target}" ]]; then
@@ -82,17 +116,17 @@ getjdk() {
         return 1
     fi
 
-    local target_jdk="${target}/utils/jdk/"
-    local target_bin="${target_jdk}/bin/"
+    local target_jdk="${target}/utils/jdk"
+    local target_bin="${target_jdk}/bin"
     if [[ -e "${target_bin}/java" ]] && [[ -e "${target_bin}/javac" ]] && [[ -e "${target_bin}/jar" ]]; then
         return 0
     fi
 
-    has_command patchelf
+    if ! "${CONTENERIZED}"; then
+        has_command patchelf
+    fi
     has_command curl
     has_command unzip
-
-    mkdir -p "${target_jdk}"
 
     local tmp_jdk
     tmp_jdk="$(mktemp)"
@@ -103,14 +137,18 @@ getjdk() {
         echo "Error: Download failed!"
         return 1
     fi
+
+    mkdir -p "${target_jdk}"
     if ! unzip -q "${tmp_jdk}" -d "${target_jdk}"; then
         echo "Error: Couldn't extract JDK!"
         return 1
     fi
 
     echo "Patching java..."
-    patchelf --clear-execstack "${target_jdk}/jre/lib/i386/j9vm/libjvm.so"
-    patchelf --clear-execstack "${target_jdk}/jre/lib/i386"/*.so
+    x86 "${target_jdk}" -- \
+      patchelf --clear-execstack "${target_jdk}/jre/lib/i386/j9vm/libjvm.so"
+    x86 "${target_jdk}" -- \
+      patchelf --clear-execstack "${target_jdk}/jre/lib/i386"/*.so
 
     echo "Done!"
 }
@@ -155,34 +193,34 @@ sanitize_path() {
 
 #   confirm_overwrite <file>
 confirm_overwrite() {
-    local file="$1"
+    local target="$1"
 
-    if [[ -f "$file" ]]; then
-        read -p "File '$file' already exists. Overwrite? [y/N]: " answer
-        case "$answer" in
-        [Yy]*) return 0 ;;
-        *)
-            echo "Aborting." >&2
-            exit 1
-            ;;
+    if [[ -f "${target}" ]]; then
+        read -p "File '${target}' already exists. Overwrite? [y/N]: " answer
+        case "${answer}" in
+            [Yy]*) return 0 ;;
+            *)
+                echo "Aborting." >&2
+                exit 1
+                ;;
         esac
-    elif [[ -d "$file" ]]; then
-        read -p "Directory '$file' already exists. Overwrite? [y/N]: " answer
-        case "$answer" in
-        [Yy]*) : ;;
-        *)
-            echo "Aborting." >&2
-            exit 1
-            ;;
+    elif [[ -d "${target}" ]]; then
+        read -p "Directory '${target}' already exists. Overwrite? [y/N]: " answer
+        case "${answer}" in
+            [Yy]*) : ;;
+            *)
+                echo "Aborting." >&2
+                exit 1
+                ;;
         esac
-        # TODO: isn't "yes to overwrite" enough?
+
         read -p "Should I delete it? [Y/n]: " answer
-        case "$answer" in
-        [Nn]*) return 0 ;;
-        *)
-            [[ -n "$file" ]] && [[ "$file" != "/" ]] && [[ -d "$file" ]] && rm -rf "$file"
-            return 0
-            ;;
+        case "${answer}" in
+            [Nn]*) return 0 ;;
+            *)
+                [[ -n "${target}" ]] && [[ "${target}" != "/" ]] && [[ -d "${target}" ]] && rm -rf "${target}"
+                return 0
+                ;;
         esac
     fi
     return 0
@@ -199,13 +237,37 @@ cleanup_java() {
     perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
 }
 
+is_wsl() {
+    # Kernel identifiers
+    if grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null; then
+        return 0
+    fi
+    if grep -qi 'microsoft' /proc/version 2>/dev/null; then
+        return 0
+    fi
+
+    # Env hints set by WSL
+    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+### Defaults ###
+CONTENERIZED=false
+if [ "$(uname -s)" == "Darwin" ]; then
+    # Enable docker mode by default on MacOS
+    CONTENERIZED=true
+fi
 CLEANUP=true
 MODE=""
 
-PARAMS_SHORT="hxabni"
-PARAMS_LONG="help,jxe,jar,build,nocleanup,install"
-PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
-eval set -- "$PARAMS"
+### Params processing ###
+PARAMS_SHORT="hxabnid"
+PARAMS_LONG="help,jxe,jar,build,nocleanup,install,docker"
+#PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
+PARAMS=$(getopt "${PARAMS_SHORT}" "$@") # TODO macos supports only short opts :/ will think of something later
+eval set -- "${PARAMS}"
 while true; do
     case "$1" in
         -h|--help)
@@ -232,6 +294,14 @@ while true; do
             MODE="install"
             shift
             ;;
+        -d|--docker)
+            if is_wsl; then
+                echo "Docker mode is not available on WSL!" >&2
+                exit 1
+            fi
+            CONTENERIZED=true
+            shift
+            ;;
         --)
             shift
             break
@@ -248,6 +318,7 @@ if [[ -z "${MODE}" ]]; then
     exit 64
 fi
 
+### Install ###
 if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
     INSTALL_DIR="$HOME/.local/share/lsdtool"
     SYMLINK="$HOME/.local/bin/lsdtool"
@@ -283,26 +354,36 @@ if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
     exit 0
 fi
 
-has_command java "Please install JDK."
-has_command jar "Please install JDK, JRE is nice, but not sufficient."
-has_command perl "Please install perl."
-has_command ldd
-has_command file
+### Preflight checks ###
+if "${CONTENERIZED}"; then
+    container_prepare
+fi
 
 getjdk "${SCRIPT_DIR}"
+
+if ! "${CONTENERIZED}"; then
+    has_command java "Please install JDK."
+    has_command jar "Please install JDK, JRE is nice, but not sufficient."
+    has_command ldd
+    has_command file
+fi
+has_command perl "Please install perl."
+
 
 export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
 export PATH="${JAVA_HOME}/bin:${PATH}"
 
 NEEDED_EXECUTABLES=(
-    "$SCRIPT_DIR/utils/jdk/bin/javac"
-    "$SCRIPT_DIR/utils/JXE2JAR"
+    "${JAVA_HOME}/bin/java"
+    "${JAVA_HOME}/bin/javac"
+    "${JAVA_HOME}/bin/jar"
+    "${SCRIPT_DIR}/utils/JXE2JAR"
 )
 
 # Check all files exist
 for f in "${NEEDED_EXECUTABLES[@]}"; do
-    if [[ ! -f "$f" ]]; then
-        echo "Missing required file: $f"
+    if [[ ! -f "${f}" ]]; then
+        echo "Missing required file: ${f}"
         exit 1
     fi
 done
@@ -310,17 +391,18 @@ done
 # Check if any executable bit is missing
 MISSING_X=()
 for f in "${NEEDED_EXECUTABLES[@]}"; do
-    [[ -x "$f" ]] || MISSING_X+=("$f")
+    [[ -x "${f}" ]] || MISSING_X+=("${f}")
 done
 
 # If some files need +x, prompt once
 if [[ ${#MISSING_X[@]} -gt 0 ]]; then
     echo "The following required files are not executable:"
     for f in "${MISSING_X[@]}"; do
-        echo "    $f"
+        echo "    ${f}"
     done
+
     read -p "Attempt to fix permissions for all required files with chmod +x? [Y/n]: " answer
-    case "$answer" in
+    case "${answer}" in
         [Nn]* ) echo "Aborting."; exit 1 ;;
         * )
             # Attempt as current user, fallback to sudo if needed
@@ -330,40 +412,48 @@ if [[ ${#MISSING_X[@]} -gt 0 ]]; then
     esac
 fi
 
-if file "${SCRIPT_DIR}/utils/jdk/bin/javac" | grep -q "32-bit"; then
-    if ! ldd "${SCRIPT_DIR}/utils/jdk/bin/javac" >/dev/null 2>&1; then
-        echo "Error: Cannot execute 32-bit javac. Make sure lib32-gcc-libs is installed:"
-        ldd "${SCRIPT_DIR}/utils/jdk/bin/javac"
-        exit 1
-    fi
-else
+if ! file "${JAVA_HOME}/bin/javac" | grep -q "32-bit"; then
     echo "Error: cannot recognize javac binary"
     exit 1
 fi
 
+if ! "${CONTENERIZED}" && ! ldd "${JAVA_HOME}/bin/javac" >/dev/null 2>&1; then
+    echo "Error: Cannot execute 32-bit javac. Make sure lib32-gcc-libs is installed:"
+    ldd "${JAVA_HOME}/bin/javac" || true
+    exit 1
+fi
+
+### Execute ###
 if [[ "${MODE}" == "jxe" ]]; then
     SOURCE="$(sanitize_path "${1:-lsd.jxe}")"
     DESTINATION="$(sanitize_path "${2:-lsd_java}")"
     SOURCE_JAR="${SOURCE%.*}.jar"
+    SOURCE_DIR="$(dirname "${SOURCE}")"
 
+    #TODO check/ensure SOURCE_DIR & DESTINATION exists?
     f_exists "${SOURCE}"
     confirm_overwrite "${SOURCE_JAR}"
     confirm_overwrite "${DESTINATION}"
 
     echo "Converting ${SOURCE} -> ${SOURCE_JAR}"
-    "${SCRIPT_DIR}/utils/JXE2JAR" "${SOURCE}" "${SOURCE_JAR}"
+    x86 "${SOURCE_DIR}" -- \
+      "${SCRIPT_DIR}/utils/JXE2JAR" "${SOURCE}" "${SOURCE_JAR}"
 
     echo "Decompiling ${SOURCE_JAR} -> ${DESTINATION}"
-    "${SCRIPT_DIR}/utils/jdk/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
+    x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
+      "${JAVA_HOME}/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
 elif [[ "${MODE}" == "jar" ]]; then
     SOURCE="$(sanitize_path "${1:-lsd.jar}")"
     DESTINATION="$(sanitize_path "${2:-lsd_java}")"
+    SOURCE_DIR="$(dirname "${SOURCE}")"
 
+    #TODO check/ensure SOURCE_DIR & DESTINATION exists?
     f_exists "${SOURCE}"
     confirm_overwrite "${DESTINATION}"
 
     echo "Decompiling ${SOURCE} -> ${DESTINATION}"
-    "${SCRIPT_DIR}/utils/jdk/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
+    x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
+      "${JAVA_HOME}/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
 elif [[ "${MODE}" == "build" ]]; then
     SOURCE="$(sanitize_path "${1:-patch}")"
     DESTINATION="$(sanitize_path "${2:-$SOURCE.jar}")"
@@ -386,7 +476,8 @@ elif [[ "${MODE}" == "build" ]]; then
 
     for f in "${FILES[@]}"; do
         echo "Compiling ${f}"
-        "${SCRIPT_DIR}/utils/jdk/bin/javac" -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "${f}"
+        x86 "${SOURCE}" "$(dirname "${CLASSPATH}")" -- \
+          "${JAVA_HOME}/bin/javac" -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "${f}"
     done
 
     CLASSES=()
@@ -394,5 +485,6 @@ elif [[ "${MODE}" == "build" ]]; then
         CLASSES+=("${f%.java}.class")
     done
 
-    "${SCRIPT_DIR}/utils/jdk/bin/jar" cvf "${DESTINATION}" "${CLASSES[@]}"
+    x86 "${SOURCE}" "$(dirname "${DESTINATION}")" -- \
+      "${JAVA_HOME}/bin/jar" cvf "${DESTINATION}" "${CLASSES[@]}"
 fi
