@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 export LC_ALL=C.UTF-8
+
+if [[ $EUID -eq 0 ]]; then
+    echo "Error: Don't run this as root, please." >&2
+    exit 1
+fi
 
 SOURCE="$(realpath "${0}")"
 SCRIPT_DIR="$(dirname "${SOURCE}")"
@@ -194,11 +198,6 @@ cleanup_java() {
     # TODO: can perl be avoided?
     perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
 }
-
-if [[ $EUID -eq 0 ]]; then
-    echo "Error: Don't run this as root, please." >&2
-    exit 1
-fi
 
 CLEANUP=true
 MODE=""
