@@ -1,6 +1,8 @@
 # lsdtool
 lsdtool is a linux utility intended to make it easier to patch java classes / functions that are included in the lsd.jxe compiled library in MIB2 infotainment units
-based on https://gitlab.com/alelec/mib2-lsd-patching/, this tool provides some advantages over the original, notably bundling python2 binaries along with JXE2JAR utility and patching the 32bit j9 JDK to run on modern platforms
+
+Based on https://gitlab.com/alelec/mib2-lsd-patching/, this tool provides some advantages over the original, notably bundling python2 binaries along with JXE2JAR utility and patching the 32bit j9 JDK to run on modern platforms
+
 # Usage
 lsdtool -h shows list of available commands.
 ```
