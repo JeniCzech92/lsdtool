@@ -3,13 +3,10 @@ set -euo pipefail
 
 export LC_ALL=C.UTF-8
 
-SOURCE="${BASH_SOURCE[0]}"
-while [ -h "$SOURCE" ]; do
-  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-done
-SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+SOURCE="$(realpath "${0}")"
+SCRIPT_DIR="$(dirname "${SOURCE}")"
+
+JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-pxi3260sr4ifx.zip"
 
 print_help() {
     cat <<EOF
@@ -33,45 +30,120 @@ Options:
 EOF
 }
 
-#   sanitize_path <path> [extension] [folder-mode]
+has_command() {
+    local cmd="${1:-}"
+    local advice="${2:-}"
+
+    if [[ -z "${cmd}" ]]; then
+        echo "Error: empty command name" >&2
+        return 1
+    fi
+
+    if ! which "${cmd}" >/dev/null; then
+        echo "Error: ${cmd} not found in PATH! ${advice}"
+        return 1
+    fi
+}
+
+f_exists() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        echo "Error: empty path provided" >&2
+        return 1
+    fi
+
+    if [[ ! -f "${target}" ]]; then
+        echo "Error: file not found: ${target}" >&2
+        return 1
+    fi
+}
+
+d_exists() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        echo "Error: empty path provided" >&2
+        return 1
+    fi
+
+    if [[ ! -d "${target}" ]]; then
+        echo "Error: directory not found: ${target}" >&2
+        return 1
+    fi
+}
+
+getjdk() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        echo "Error: empty JDK target path" >&2
+        return 1
+    fi
+
+    local target_jdk="${target}/utils/jdk/"
+    local target_bin="${target_jdk}/bin/"
+    if [[ -e "${target_bin}/java" ]] && [[ -e "${target_bin}/javac" ]] && [[ -e "${target_bin}/jar" ]]; then
+        return 0
+    fi
+
+    has_command patchelf
+    has_command curl
+    has_command unzip
+
+    mkdir -p "${target_jdk}"
+
+    local tmp_jdk
+    tmp_jdk="$(mktemp)"
+    trap "rm -f '${tmp_jdk}'" RETURN EXIT SIGINT
+
+    echo "Downloading 32-bit JDK..."
+    if ! curl -fSL "${JDK_URL}" -o "${tmp_jdk}"; then
+        echo "Error: Download failed!"
+        return 1
+    fi
+    if ! unzip -q "${tmp_jdk}" -d "${target_jdk}"; then
+        echo "Error: Couldn't extract JDK!"
+        return 1
+    fi
+
+    echo "Patching java..."
+    patchelf --clear-execstack "${target_jdk}/jre/lib/i386/j9vm/libjvm.so"
+    patchelf --clear-execstack "${target_jdk}/jre/lib/i386"/*.so
+
+    echo "Done!"
+}
+
+#   sanitize_path <path> [extension]
 sanitize_path() {
-    local input="$1"
-    local ext="${2:-}"               # optional extension
-    local folder_mode="${3:-false}"  # treat path as folder
+    local input="${1:-}"
 
     # Strip trailing slashes for normalization
     input="${input%/}"
 
     # Validate non-empty
-    if [[ -z "$input" ]]; then
+    if [[ -z "${input}" ]]; then
         echo "Error: empty path" >&2
-        exit 1
+        return 1
     fi
 
     # Reject Windows-style backslashes
-    if [[ "$input" == *\\* ]]; then
-        echo "Error: invalid character '\\' in path: $input" >&2
-        exit 1
+    if [[ "${input}" == *\\* ]]; then
+        echo "Error: invalid character '\\' in path: ${input}" >&2
+        return 1
     fi
 
+    # TODO: can we finish here?
+
     # Reject wildcards (* ? [ ])
-    if [[ "$input" == *[\*\?\[]* ]]; then
-        echo "Error: wildcards are not allowed in path: $input" >&2
-        exit 1
+    if [[ "${input}" == *[\*\?\[]* ]]; then
+        echo "Error: wildcards are not allowed in path: ${input}" >&2
+        return 1
     fi
 
     # Normalize absolute vs relative
-    local path=""
-    if [[ "$input" = /* ]]; then
-        path="$input"
+    local path
+    if [[ "${input}" = /* ]]; then
+        path="${input}"
     else
-        path="./$input"
-    fi
-
-    # Append extension if provided
-    local filename=$(basename "$path")
-    if [[ -n "$ext" && "$path" != *"$ext" && "$filename" != *.* ]]; then
-        path="$path$ext"
+        path="./${input}"
     fi
 
     echo "$path"
@@ -80,24 +152,33 @@ sanitize_path() {
 #   confirm_overwrite <file>
 confirm_overwrite() {
     local file="$1"
+
     if [[ -f "$file" ]]; then
         read -p "File '$file' already exists. Overwrite? [y/N]: " answer
         case "$answer" in
-            [Yy]* ) return 0 ;;
-            * ) echo "Aborting." >&2; exit 1 ;;
+        [Yy]*) return 0 ;;
+        *)
+            echo "Aborting." >&2
+            exit 1
+            ;;
         esac
     elif [[ -d "$file" ]]; then
         read -p "Directory '$file' already exists. Overwrite? [y/N]: " answer
         case "$answer" in
-            [Yy]* ) : ;;
-            * ) echo "Aborting." >&2; exit 1 ;;
+        [Yy]*) : ;;
+        *)
+            echo "Aborting." >&2
+            exit 1
+            ;;
         esac
+        # TODO: isn't "yes to overwrite" enough?
         read -p "Should I delete it? [Y/n]: " answer
         case "$answer" in
-            [Nn]* ) return 0 ;;
-            * )
-                [ -n "$file" ] && [ "$file" != "/" ] && [ -d "$file" ] && rm -rf "$file"
-                return 0 ;;
+        [Nn]*) return 0 ;;
+        *)
+            [[ -n "$file" ]] && [[ "$file" != "/" ]] && [[ -d "$file" ]] && rm -rf "$file"
+            return 0
+            ;;
         esac
     fi
     return 0
@@ -106,67 +187,25 @@ confirm_overwrite() {
 #   cleanup_java <java file>
 cleanup_java() {
     local java_file="$1"
+
     echo "Cleanup $java_file"
     sed -i 's: final : /*final*/ :g' "$java_file"
     sed -r -i 's:  @Override: // @Override:g' "$java_file"
+    # TODO: can perl be avoided?
     perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
 }
-
-getjdk() {
-    if [ ! -e "$1/utils/jdk/bin/javac" ]; then
-        if ! command --version patchelf >/dev/null 2>&1; then
-            echo "Downloading 32-bit JDK..."
-            mkdir -p "$1/utils/jdk"
-            pushd "$1/utils/jdk" >/dev/null || exit 1
-
-            JDK_ZIP="ibm-java-ws-sdk-pxi3260sr4ifx.zip"
-            JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/${JDK_ZIP}"
-
-            if ! curl -fSL "$JDK_URL" -o "$JDK_ZIP"; then
-                echo "Error: Download failed!"
-                popd >/dev/null
-                exit 1
-            fi
-
-            if command -v unzip >/dev/null 2>&1; then
-                unzip -q "$JDK_ZIP"
-            else
-                echo "Error: unzip command not found, cannot extract JDK!" >&2
-                popd >/dev/null
-                exit 1
-            fi
-            rm -f "$JDK_ZIP"
-            echo "Patching java..."
-            patchelf --clear-execstack ./jre/lib/i386/j9vm/libjvm.so
-            patchelf --clear-execstack ./jre/lib/i386/*.so
-            popd >/dev/null || exit 1
-        else
-            echo "Error: 32-bit JDK not found, we will need patchelf, but we don't have it."
-            exit 1
-        fi
-    fi
-}
-
-f_exists() { [[ -f "$1" ]] || { echo "Error: file not found: $1" >&2; exit 1; }; }
-d_exists()  { [[ -d "$1" ]] || { echo "Error: directory not found: $1" >&2; exit 1; }; }
 
 if [[ $EUID -eq 0 ]]; then
     echo "Error: Don't run this as root, please." >&2
     exit 1
 fi
 
-PARAMS=$(getopt -o hxabni \
-    --long help,jxe,jar,build,nocleanup,install \
-    -n "$0" -- "$@")
-if [[ $? -ne 0 ]]; then
-    exit 1
-fi
+CLEANUP=true
+MODE=""
 
-if [[ $# -eq 0 ]]; then
-    print_help
-    exit 64
-fi
-
+PARAMS_SHORT="hxabni"
+PARAMS_LONG="help,jxe,jar,build,nocleanup,install"
+PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
 eval set -- "$PARAMS"
 while true; do
     case "$1" in
@@ -205,11 +244,16 @@ while true; do
     esac
 done
 
-if [[ "$MODE" == "install" ]]; then
+if [[ -z "${MODE}" ]]; then
+    print_help
+    exit 64
+fi
+
+if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh
     INSTALL_DIR="$HOME/.local/share/lsdtool"
     SYMLINK="$HOME/.local/bin/lsdtool"
     echo "Installing lsdtool to $INSTALL_DIR"
-    if [ -e "$INSTALL_DIR" ]; then
+    if [[ -e "$INSTALL_DIR" ]]; then
         read -rp "Installation directory already exists. Proceed anyway? [Y/n] " reply
         if [[ "$reply" =~ ^[nN] ]]; then
             echo "Aborting..."
@@ -225,75 +269,36 @@ if [[ "$MODE" == "install" ]]; then
     if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
         echo "Warning: ~/.local/bin is not in your PATH."
         shell_rc="$HOME/.bashrc"
-        if [ -n "${ZSH_VERSION:-}" ]; then shell_rc="$HOME/.zshrc"; fi
+        if [[ -n "${ZSH_VERSION:-}" ]]; then shell_rc="$HOME/.zshrc"; fi
         read -rp "Append export PATH=\"\$HOME/.local/bin:\$PATH\" to $shell_rc? [Y/n] " reply
         case "$reply" in
-            [nN]*) echo "Skipping PATH modification." ;;
-            *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_rc"
-               echo "Added to $shell_rc. Restart your shell or run 'source $shell_rc'." ;;
+        [nN]*) echo "Skipping PATH modification." ;;
+        *)
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >>"$shell_rc"
+            echo "Added to $shell_rc. Restart your shell or run 'source $shell_rc'."
+            ;;
         esac
     fi
-    getjdk $INSTALL_DIR
+
+    getjdk "${INSTALL_DIR}"
     exit 0
 fi
 
-if ! command -v java >/dev/null 2>&1; then
-    echo "Error: java not found in PATH. Please install JDK." >&2
-    exit 1
-fi
+getjdk "${SCRIPT_DIR}"
 
-if ! command -v jar >/dev/null 2>&1; then
-    echo "Error: jar not found in PATH. Please install JDK, JRE is nice, but not sufficient." >&2
-    exit 1
-fi
+export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
+export PATH="${JAVA_HOME}/bin:${PATH}"
 
-if ! command -v perl >/dev/null 2>&1; then
-    echo "Error: perl not found in PATH. Please install perl." >&2
-    exit 1
-fi
+has_command java "Please install JDK."
+has_command jar "Please install JDK, JRE is nice, but not sufficient."
+has_command perl "Please install perl."
+has_command ldd "Make sure lib32-gcc-libs / libc6:i386 is installed."
+has_command file
 
-getjdk $SCRIPT_DIR
-
-NEEDED_EXECUTABLES=(
-    "$SCRIPT_DIR/utils/jdk/bin/javac"
-    "$SCRIPT_DIR/utils/JXE2JAR"
-)
-
-# Check all files exist
-for f in "${NEEDED_EXECUTABLES[@]}"; do
-    if [[ ! -f "$f" ]]; then
-        echo "Missing required file: $f"
-        exit 1
-    fi
-done
-
-# Check if any executable bit is missing
-MISSING_X=()
-for f in "${NEEDED_EXECUTABLES[@]}"; do
-    [[ -x "$f" ]] || MISSING_X+=("$f")
-done
-
-# If some files need +x, prompt once
-if [[ ${#MISSING_X[@]} -gt 0 ]]; then
-    echo "The following required files are not executable:"
-    for f in "${MISSING_X[@]}"; do
-        echo "    $f"
-    done
-    read -p "Attempt to fix permissions for all required files with chmod +x? [Y/n]: " answer
-    case "$answer" in
-        [Nn]* ) echo "Aborting."; exit 1 ;;
-        * )
-            # Attempt as current user, fallback to sudo if needed
-            chmod +x "${NEEDED_EXECUTABLES[@]}" 2>/dev/null || sudo chmod +x "${NEEDED_EXECUTABLES[@]}"
-            echo "Permissions fixed."
-            ;;
-    esac
-fi
-
-if file "$SCRIPT_DIR/utils/jdk/bin/javac" | grep -q "32-bit"; then
-    if ! ldd "$SCRIPT_DIR/utils/jdk/bin/javac" >/dev/null 2>&1; then
+if file "${SCRIPT_DIR}/utils/jdk/bin/javac" | grep -q "32-bit"; then
+    if ! ldd "${SCRIPT_DIR}/utils/jdk/bin/javac" >/dev/null 2>&1; then
         echo "Error: Cannot execute 32-bit javac. Make sure lib32-gcc-libs is installed:"
-        ldd "$SCRIPT_DIR/utils/jdk/bin/javac"
+        ldd "${SCRIPT_DIR}/utils/jdk/bin/javac"
         exit 1
     fi
 else
@@ -301,48 +306,58 @@ else
     exit 1
 fi
 
-CLEANUP=true
+if [[ "${MODE}" == "jxe" ]]; then
+    SOURCE="$(sanitize_path "${1:-lsd.jxe}")"
+    DESTINATION="$(sanitize_path "${2:-lsd_java}")"
+    SOURCE_JAR="${SOURCE%.*}.jar"
 
-if [[ "$MODE" == "jxe" ]]; then
-    SOURCE="$(sanitize_path "${1:-lsd.jxe}" ".jxe")"
-    DESTINATION="$(sanitize_path "${2:-lsd_java}" "" true)"
-    f_exists "$SOURCE"
-    confirm_overwrite "${SOURCE%.*}.jar"
-    confirm_overwrite "$DESTINATION"
-    echo "Converting $SOURCE -> ${SOURCE%.*}.jar"
-    $SCRIPT_DIR/utils/JXE2JAR "$SOURCE" "${SOURCE%.*}.jar"
-    echo "Decompiling ${SOURCE%.*}.jar -> $DESTINATION"
-    java -Xmx6g -jar $SCRIPT_DIR/utils/cfr-0.152.jar --previewfeatures false --switchexpression false --outputdir $DESTINATION ${SOURCE%.*}.jar
-elif [[ "$MODE" == "jar" ]]; then
-    SOURCE="$(sanitize_path "${1:-lsd.jar}" ".jar")"
-    DESTINATION="$(sanitize_path "${2:-lsd_java}" "" true)"
-    f_exists "$SOURCE"
-    confirm_overwrite "$DESTINATION"
-    echo "Decompiling $SOURCE -> $DESTINATION"
-    java -Xmx6g -jar $SCRIPT_DIR/utils/cfr-0.152.jar --previewfeatures false --switchexpression false --outputdir $DESTINATION $SOURCE
-elif [[ "$MODE" == "build" ]]; then
-    SOURCE="$(sanitize_path "${1:-patch}" "" true)"
-    DESTINATION="$(sanitize_path "${2:-$SOURCE.jar}" ".jar")"
-    CLASSPATH="$(sanitize_path "${3:-lsd.jar}" ".jar")"
-    d_exists "$SOURCE"
-    f_exists "$CLASSPATH"
-    confirm_overwrite "$DESTINATION"
+    f_exists "${SOURCE}"
+    confirm_overwrite "${SOURCE_JAR}"
+    confirm_overwrite "${DESTINATION}"
+
+    echo "Converting ${SOURCE} -> ${SOURCE_JAR}"
+    "${SCRIPT_DIR}/utils/JXE2JAR" "${SOURCE}" "${SOURCE_JAR}"
+
+    echo "Decompiling ${SOURCE_JAR} -> ${DESTINATION}"
+    "${SCRIPT_DIR}/utils/jdk/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
+elif [[ "${MODE}" == "jar" ]]; then
+    SOURCE="$(sanitize_path "${1:-lsd.jar}")"
+    DESTINATION="$(sanitize_path "${2:-lsd_java}")"
+
+    f_exists "${SOURCE}"
+    confirm_overwrite "${DESTINATION}"
+
+    echo "Decompiling ${SOURCE} -> ${DESTINATION}"
+    "${SCRIPT_DIR}/utils/jdk/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
+elif [[ "${MODE}" == "build" ]]; then
+    SOURCE="$(sanitize_path "${1:-patch}")"
+    DESTINATION="$(sanitize_path "${2:-$SOURCE.jar}")"
+    CLASSPATH="$(sanitize_path "${3:-lsd.jar}")"
+
+    d_exists "${SOURCE}"
+    f_exists "${CLASSPATH}"
+    confirm_overwrite "${DESTINATION}"
+
     FILES=()
-    CLASSES=()
-    while IFS= read -r file; do
-        FILES+=("$file")
-    done < <(find "$SOURCE" -type f -name '*.java')
-    if [[ "${CLEANUP:-true}" == true ]]; then
+    for file in "${SOURCE}"/**/*.java; do
+        FILES+=("${file}")
+    done
+
+    if "${CLEANUP}"; then
         for f in "${FILES[@]}"; do
-            cleanup_java "$f"
+            cleanup_java "${f}"
         done
     fi
+
     for f in "${FILES[@]}"; do
-        echo "Compiling $f"
-        $SCRIPT_DIR/utils/jdk/bin/javac -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "$f"
+        echo "Compiling ${f}"
+        "${SCRIPT_DIR}/utils/jdk/bin/javac" -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "${f}"
     done
+
+    CLASSES=()
     for f in "${FILES[@]}"; do
         CLASSES+=("${f%.java}.class")
     done
-    jar cvf "$DESTINATION" "${CLASSES[@]}"
+
+    "${SCRIPT_DIR}/utils/jdk/bin/jar" cvf "${DESTINATION}" "${CLASSES[@]}"
 fi
