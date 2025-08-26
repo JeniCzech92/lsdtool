@@ -283,16 +283,52 @@ if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
     exit 0
 fi
 
-getjdk "${SCRIPT_DIR}"
-
-export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
-export PATH="${JAVA_HOME}/bin:${PATH}"
-
 has_command java "Please install JDK."
 has_command jar "Please install JDK, JRE is nice, but not sufficient."
 has_command perl "Please install perl."
 has_command ldd "Make sure lib32-gcc-libs / libc6:i386 is installed."
 has_command file
+
+getjdk "${SCRIPT_DIR}"
+
+export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
+export PATH="${JAVA_HOME}/bin:${PATH}"
+
+NEEDED_EXECUTABLES=(
+    "$SCRIPT_DIR/utils/jdk/bin/javac"
+    "$SCRIPT_DIR/utils/JXE2JAR"
+)
+
+# Check all files exist
+for f in "${NEEDED_EXECUTABLES[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        echo "Missing required file: $f"
+        exit 1
+    fi
+done
+
+# Check if any executable bit is missing
+MISSING_X=()
+for f in "${NEEDED_EXECUTABLES[@]}"; do
+    [[ -x "$f" ]] || MISSING_X+=("$f")
+done
+
+# If some files need +x, prompt once
+if [[ ${#MISSING_X[@]} -gt 0 ]]; then
+    echo "The following required files are not executable:"
+    for f in "${MISSING_X[@]}"; do
+        echo "    $f"
+    done
+    read -p "Attempt to fix permissions for all required files with chmod +x? [Y/n]: " answer
+    case "$answer" in
+        [Nn]* ) echo "Aborting."; exit 1 ;;
+        * )
+            # Attempt as current user, fallback to sudo if needed
+            chmod +x "${NEEDED_EXECUTABLES[@]}" 2>/dev/null || sudo chmod +x "${NEEDED_EXECUTABLES[@]}"
+            echo "Permissions fixed."
+            ;;
+    esac
+fi
 
 if file "${SCRIPT_DIR}/utils/jdk/bin/javac" | grep -q "32-bit"; then
     if ! ldd "${SCRIPT_DIR}/utils/jdk/bin/javac" >/dev/null 2>&1; then
