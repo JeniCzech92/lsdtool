@@ -248,7 +248,7 @@ if [[ -z "${MODE}" ]]; then
     exit 64
 fi
 
-if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh
+if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
     INSTALL_DIR="$HOME/.local/share/lsdtool"
     SYMLINK="$HOME/.local/bin/lsdtool"
     echo "Installing lsdtool to $INSTALL_DIR"
@@ -262,20 +262,20 @@ if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh
     mkdir -p "$INSTALL_DIR"
     cp $SCRIPT_DIR/lsdtool.sh $INSTALL_DIR/lsdtool.sh
     echo "Making symlink at $SYMLINK"
-    cp -rT $SCRIPT_DIR/utils $INSTALL_DIR/utils
-    rm $SYMLINK
+    cp -aT $SCRIPT_DIR/utils $INSTALL_DIR/utils
+    rm -f $SYMLINK
     ln -s "$INSTALL_DIR/lsdtool.sh" "$SYMLINK"
+    chmod +x "$SYMLINK" # TODO: should be covered by permissions on lsdtool.sh
+    chmod +x "$INSTALL_DIR/utils/JXE2JAR" # TODO: should be sorted out by git itslef and `-a` flag for cp
     if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
         echo "Warning: ~/.local/bin is not in your PATH."
         shell_rc="$HOME/.bashrc"
-        if [[ -n "${ZSH_VERSION:-}" ]]; then shell_rc="$HOME/.zshrc"; fi
+        if [ -n "${ZSH_VERSION:-}" ]; then shell_rc="$HOME/.zshrc"; fi
         read -rp "Append export PATH=\"\$HOME/.local/bin:\$PATH\" to $shell_rc? [Y/n] " reply
         case "$reply" in
-        [nN]*) echo "Skipping PATH modification." ;;
-        *)
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >>"$shell_rc"
-            echo "Added to $shell_rc. Restart your shell or run 'source $shell_rc'."
-            ;;
+            [nN]*) echo "Skipping PATH modification." ;;
+            *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_rc"
+               echo "Added to $shell_rc. Restart your shell or run 'source $shell_rc'." ;;
         esac
     fi
 
