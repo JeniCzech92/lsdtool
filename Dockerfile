@@ -1,5 +1,5 @@
 # Stage 1: Build patchelf from source
-FROM debian:bookworm-slim AS builder
+FROM debian:bullseye-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -13,12 +13,12 @@ RUN curl -L https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-
 
 
 # Stage 2: Actual runtime image
-FROM debian:bookworm-slim
+FROM debian:bullseye-slim
 
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates libc6:i386 patchelf:i386 binutils:i386 curl unzip file && \
+        ca-certificates libc6:i386 patchelf:i386 binutils:i386 curl unzip file libpython2.7:i386 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
