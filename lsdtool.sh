@@ -15,10 +15,20 @@ JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-
 CONTAINER_IMAGE_ID="${SCRIPT_DIR}/utils/.container-image-id"
 CONTAINER_IMAGE_RECIPIE="${SCRIPT_DIR}/Dockerfile"
 
-print_help() {
-    cat <<EOF
-Usage: $0 [OPTIONS] [SOURCE] [DESTINATION] [CLASSPATH]
+has_long_params() {
+     [[ "$(getopt -o h --long help --name test -- --help 2>/dev/null | tr -d ' ')" == "--help--" ]]
+}
 
+print_help() {
+    echo "Usage: $0 [OPTIONS] [SOURCE] [DESTINATION] [CLASSPATH]"
+    echo
+
+    if ! has_long_params; then
+        echo "NOTICE! Only short flags are supported on your OS!"
+        echo
+    fi
+
+    cat <<EOF
 Options:
   -h, --help             Show this help message
   -x, --jxe              Convert lsd.jxe to lsd.jar and decompile it
@@ -233,7 +243,6 @@ cleanup_java() {
     echo "Cleanup $java_file"
     sed -i 's: final : /*final*/ :g' "$java_file"
     sed -r -i 's:  @Override: // @Override:g' "$java_file"
-    # TODO: can perl be avoided?
     perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
 }
 
@@ -265,8 +274,12 @@ MODE=""
 ### Params processing ###
 PARAMS_SHORT="hxabnid"
 PARAMS_LONG="help,jxe,jar,build,nocleanup,install,docker"
-#PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
-PARAMS=$(getopt "${PARAMS_SHORT}" "$@") # TODO macos supports only short opts :/ will think of something later
+if has_long_params; then
+    PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
+else
+    PARAMS=$(getopt "${PARAMS_SHORT}" "$@")
+fi
+
 eval set -- "${PARAMS}"
 while true; do
     case "$1" in
