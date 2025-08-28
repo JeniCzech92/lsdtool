@@ -182,14 +182,6 @@ sanitize_path() {
         return 1
     fi
 
-    # TODO: can we finish here?
-
-    # Reject wildcards (* ? [ ])
-    if [[ "${input}" == *[\*\?\[]* ]]; then
-        echo "Error: wildcards are not allowed in path: ${input}" >&2
-        return 1
-    fi
-
     # Normalize absolute vs relative
     local path
     if [[ "${input}" = /* ]]; then
@@ -217,19 +209,13 @@ confirm_overwrite() {
     elif [[ -d "${target}" ]]; then
         read -p "Directory '${target}' already exists. Overwrite? [y/N]: " answer
         case "${answer}" in
-            [Yy]*) : ;;
+            [Yy]*)
+                [[ -n "${target}" ]] && [[ "${target}" != "/" ]] && [[ -d "${target}" ]] && rm -rf "${target}"
+                return 0
+                ;;
             *)
                 echo "Aborting." >&2
                 exit 1
-                ;;
-        esac
-
-        read -p "Should I delete it? [Y/n]: " answer
-        case "${answer}" in
-            [Nn]*) return 0 ;;
-            *)
-                [[ -n "${target}" ]] && [[ "${target}" != "/" ]] && [[ -d "${target}" ]] && rm -rf "${target}"
-                return 0
                 ;;
         esac
     fi
@@ -243,7 +229,40 @@ cleanup_java() {
     echo "Cleanup $java_file"
     sed -i 's: final : /*final*/ :g' "$java_file"
     sed -r -i 's:  @Override: // @Override:g' "$java_file"
-    perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
+    #perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
+    # experimental awk variant of the above. Attrocious, but does the job and performs roughly equally well
+    awk '
+        function rtrim(s){ sub(/[ \t]+$/, "", s); return s }
+        {
+          line = $0
+          # match: <indent>default ... {   (opening line)
+          if (line ~ /^[ \t]*default[ \t].*\{\s*$/) {
+            dpos   = index(line, "default")
+            indent = substr(line, 1, dpos-1)
+            ob     = index(line, "{")
+            if (ob > 0) {
+              # extract signature between "default" and "{"
+              i = dpos + length("default")
+              while (i <= length(line) && substr(line,i,1) ~ /[ \t]/) i++
+              sig = substr(line, i, ob - i)
+              sig = rtrim(sig)
+
+              # peek next line; must be same-indent + "}"
+              if (getline nl) {
+                if (nl ~ ("^" indent "[ \t]*}$")) {
+                  print indent "/*default*/ " sig " ;"
+                  next  # skip printing the "}" line
+                } else {
+                  print line
+                  print nl
+                  next
+                }
+              }
+            }
+          }
+          print
+        }
+        ' "$java_file" > "$java_file.tmp" && mv "$java_file.tmp" "$java_file"
 }
 
 is_wsl() {
@@ -349,8 +368,6 @@ if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
     cp -aT $SCRIPT_DIR/utils $INSTALL_DIR/utils
     rm -f $SYMLINK
     ln -s "$INSTALL_DIR/lsdtool.sh" "$SYMLINK"
-    chmod +x "$SYMLINK" # TODO: should be covered by permissions on lsdtool.sh
-    chmod +x "$INSTALL_DIR/utils/JXE2JAR" # TODO: should be sorted out by git itslef and `-a` flag for cp
     if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
         echo "Warning: ~/.local/bin is not in your PATH."
         shell_rc="$HOME/.bashrc"
@@ -375,19 +392,17 @@ fi
 getjdk "${SCRIPT_DIR}"
 
 if ! "${CONTENERIZED}"; then
-    has_command java "Please install JDK."
-    has_command jar "Please install JDK, JRE is nice, but not sufficient."
-    has_command ldd
+    has_command java "Please install java." # jar in the 32-bit JDK works, so we just need any java to run decompiler
+    # has_command jar "Please install JDK, JRE is nice, but not sufficient."
+    # has_command ldd # we use ldd only on Linux/WSL, and there it is always present.
     has_command file
 fi
-has_command perl "Please install perl."
+# has_command perl "Please install perl." # no longer neccessary
 
 
 export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
-export PATH="${JAVA_HOME}/bin:${PATH}"
 
 NEEDED_EXECUTABLES=(
-    "${JAVA_HOME}/bin/java"
     "${JAVA_HOME}/bin/javac"
     "${JAVA_HOME}/bin/jar"
     "${SCRIPT_DIR}/utils/JXE2JAR"
@@ -400,6 +415,10 @@ for f in "${NEEDED_EXECUTABLES[@]}"; do
         exit 1
     fi
 done
+
+
+# In case the original permissions are not retained (i.e. copied to *nix permission style unaware filesystem, such as NTFS)
+# the permissions will be reset to 644 - we will check the permissions before we run them just in case
 
 # Check if any executable bit is missing
 MISSING_X=()
@@ -443,7 +462,6 @@ if [[ "${MODE}" == "jxe" ]]; then
     SOURCE_JAR="${SOURCE%.*}.jar"
     SOURCE_DIR="$(dirname "${SOURCE}")"
 
-    #TODO check/ensure SOURCE_DIR & DESTINATION exists?
     f_exists "${SOURCE}"
     confirm_overwrite "${SOURCE_JAR}"
     confirm_overwrite "${DESTINATION}"
@@ -454,19 +472,18 @@ if [[ "${MODE}" == "jxe" ]]; then
 
     echo "Decompiling ${SOURCE_JAR} -> ${DESTINATION}"
     x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
-      "${JAVA_HOME}/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
+      "java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
 elif [[ "${MODE}" == "jar" ]]; then
     SOURCE="$(sanitize_path "${1:-lsd.jar}")"
     DESTINATION="$(sanitize_path "${2:-lsd_java}")"
     SOURCE_DIR="$(dirname "${SOURCE}")"
 
-    #TODO check/ensure SOURCE_DIR & DESTINATION exists?
     f_exists "${SOURCE}"
     confirm_overwrite "${DESTINATION}"
 
     echo "Decompiling ${SOURCE} -> ${DESTINATION}"
     x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
-      "${JAVA_HOME}/bin/java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
+      "java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
 elif [[ "${MODE}" == "build" ]]; then
     SOURCE="$(sanitize_path "${1:-patch}")"
     DESTINATION="$(sanitize_path "${2:-$SOURCE.jar}")"
@@ -476,10 +493,14 @@ elif [[ "${MODE}" == "build" ]]; then
     f_exists "${CLASSPATH}"
     confirm_overwrite "${DESTINATION}"
 
-    FILES=()
-    for file in "${SOURCE}"/**/*.java; do
-        FILES+=("${file}")
-    done
+    while IFS= read -r file; do
+        FILES+=("$file")
+    done < <(find "$SOURCE" -type f -name '*.java')
+    if [[ "${CLEANUP:-true}" == true ]]; then
+        for f in "${FILES[@]}"; do
+            cleanup_java "$f"
+        done
+    fi
 
     if "${CLEANUP}"; then
         for f in "${FILES[@]}"; do
