@@ -10,13 +10,11 @@ Based on https://gitlab.com/alelec/mib2-lsd-patching/, this tool provides some a
 * git - only to clone the repository, not really used by the tool itself
 * curl - to download the j9 JDK
 * unzip - to unpack the downloaded j9 JDK
-* perl - to clean up the decompiled java classes
 
 And:
 * x86 32bit libc - required to run 32bit j9 JDK
   * lib32-gcc-libs for archlinux
   * libc6:i386 for debian/ubuntu
-* python2 (libpython2.7) - required to run JXE2JAR utility
 * patchelf - required to patch the j9 JDK
 * file & ldd - pre-run checks
 
