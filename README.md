@@ -56,10 +56,21 @@ Options:
        [SOURCE]          Source java file. Default lsd.jar
        [DESTINATION]     Destination folder, default ./lsd_java
 
+  -c, --copy             Copies files that match string to a different folder
+       [SOURCE]          Source directory, such as ./lsd_java
+       [DESTINATION]     Destination directory, such as ./patch
+       [STRING]          String to match
+  -t  --trim             Trims unmodified classes from patch directory
+       [PATCH]           Patch directory, default ./patch
+       [SOURCE]          Original decompiled java classes, default ./lsd_java
+
   -b, --build            Build JAR patch file
        [SOURCE]          Source patch data, default ./patch
        [DESTINATION]     Target patch file, default [SOURCE].jar
        [CLASSPATH]       Original jar file, default lsd.jar
   -n, --nocleanup        Skip cleanup during build (may cause build failure)
+
   -i, --install          lsdtool can be portable, but it can also be installed
+  -d, --docker           run the toolchain inside docker - default on mac,
+                         not available on windows, optional on linux
 ```

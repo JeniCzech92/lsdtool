@@ -7,8 +7,8 @@ if [[ $EUID -eq 0 ]]; then
     exit 1
 fi
 
-SOURCE="$(realpath "${0}")"
-SCRIPT_DIR="$(dirname "${SOURCE}")"
+REALPATH="$(realpath "${0}")"
+SCRIPT_DIR="$(dirname "${REALPATH}")"
 
 JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-pxi3260sr4ifx.zip"
 
@@ -38,13 +38,23 @@ Options:
        [SOURCE]          Source java file. Default lsd.jar
        [DESTINATION]     Destination folder, default ./lsd_java
 
+  -c, --copy             Copies files that match string to a different folder
+       [SOURCE]          Source directory, such as ./lsd_java
+       [DESTINATION]     Destination directory, such as ./patch
+       [STRING]          String to match
+  -t  --trim             Trims unmodified classes from patch directory
+       [PATCH]           Patch directory, default ./patch
+       [SOURCE]          Original decompiled java classes, default ./lsd_java
+
   -b, --build            Build JAR patch file
        [SOURCE]          Source patch data, default ./patch
        [DESTINATION]     Target patch file, default [SOURCE].jar
        [CLASSPATH]       Original jar file, default lsd.jar
   -n, --nocleanup        Skip cleanup during build (may cause build failure)
+
   -i, --install          lsdtool can be portable, but it can also be installed
-  -d, --docker           run the toolchain inside docker - default on mac, not available on windows, optional on linux
+  -d, --docker           run the toolchain inside docker - default on mac,
+                         not available on windows, optional on linux
 EOF
 }
 
@@ -281,6 +291,18 @@ is_wsl() {
     return 1
 }
 
+checksum() {
+    local file="$1"
+    if command -v md5sum >/dev/null 2>&1; then
+        md5sum "$file" | cut -d' ' -f1
+    elif command -v md5 >/dev/null 2>&1; then
+        md5 -q "$file"
+    else
+        echo "No md5 checksum command found" >&2
+        return 1
+    fi
+}
+
 ### Defaults ###
 CONTENERIZED=false
 if [ "$(uname -s)" == "Darwin" ]; then
@@ -291,8 +313,8 @@ CLEANUP=true
 MODE=""
 
 ### Params processing ###
-PARAMS_SHORT="hxabnid"
-PARAMS_LONG="help,jxe,jar,build,nocleanup,install,docker"
+PARAMS_SHORT="hxactbnid"
+PARAMS_LONG="help,jxe,jar,copy,trim,build,nocleanup,install,docker"
 if has_long_params; then
     PARAMS=$(getopt -o "${PARAMS_SHORT}" --long "${PARAMS_LONG}" -n "$0" -- "$@")
 else
@@ -312,6 +334,14 @@ while true; do
             ;;
         -a|--jar)
             MODE="jar"
+            shift
+            ;;
+        -c|--copy)
+            MODE="copy"
+            shift
+            ;;
+        -t|--trim)
+            MODE="trim"
             shift
             ;;
         -b|--build)
@@ -484,6 +514,92 @@ elif [[ "${MODE}" == "jar" ]]; then
     echo "Decompiling ${SOURCE} -> ${DESTINATION}"
     x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
       "java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
+elif [[ "${MODE}" == "copy" ]]; then
+
+    # could be a function, but it's so far only use for it, so let's keep it this way for now
+    if [ -n "${3:-}" ]; then
+        MATCH="${3:-}"
+    else
+        echo "Error: String to match cannot be empty." >&2
+        exit 1
+    fi
+    
+    SOURCE="$(sanitize_path "${1:-lsd_java}")"
+    DESTINATION="$(sanitize_path "${2:-patch}")"
+
+    d_exists "${SOURCE}"
+    confirm_overwrite "${DESTINATION}"
+    DESTINATION="$(realpath "${DESTINATION}")" # we need absolute path later
+
+    mkdir -p "${DESTINATION}"
+
+    if [ "$(uname -s)" = "Darwin" ]; then # untested on macOS, proceed with caution, test, report issues. Thanks.
+        pushd "${SOURCE}" > /dev/null
+        files_to_copy=$( 
+            {
+                grep -Rl "${MATCH}" . || :
+                find . -type f -name "*${MATCH}*.java"
+            } | sort -u 
+        )
+        echo "${files_to_copy}" | pax -rw "${DESTINATION}" 2>/dev/null  || :
+
+        num_copied=$(echo "$files_to_copy" | wc -l)
+        num_copied=$(echo "$files_to_copy" | grep -cve '^\s*$') || :
+        echo "Copied ${num_copied} file(s) to ${DESTINATION}"
+        popd > /dev/null
+    else
+        pushd "${SOURCE}" > /dev/null
+        files_to_copy=$( 
+            {
+                grep -Rl "${MATCH}" . || :
+                find . -type f -name "*${MATCH}*.java"
+            } | sort -u 
+        )
+        echo "${files_to_copy}" | xargs cp --parents -t "${DESTINATION}" 2>/dev/null  || :
+        num_copied=$(echo "$files_to_copy" | wc -l)
+        num_copied=$(echo "$files_to_copy" | grep -cve '^\s*$') || :
+        echo "Copied ${num_copied} file(s) to ${DESTINATION}"
+        popd > /dev/null
+    fi
+elif [[ "${MODE}" == "trim" ]]; then
+    PATCH="$(sanitize_path "${1:-patch}")"
+    SOURCE="$(sanitize_path "${2:-lsd_java}")"
+
+    read -p "This will remove all unmodified files in "${PATCH}" directory, are you sure? [y/N]: " answer
+    case "${answer}" in
+        [Yy]*) : ;;
+        *)
+            echo "Aborting." >&2
+            exit 1
+            ;;
+    esac
+
+    d_exists "${PATCH}"
+    d_exists "${SOURCE}"
+
+    find "$PATCH" -type f -name '*.java' | while read -r patch_file; do
+        rel_path="${patch_file#$PATCH/}"
+        source_file="${SOURCE}/${rel_path}"
+
+        if [[ -f "${source_file}" ]]; then
+            patch_sum=$(checksum "${patch_file}")
+            source_sum=$(checksum "${source_file}")
+
+            if [[ "${patch_sum}" == "${source_sum}" ]]; then
+                echo "Deleting unmodified file: ${patch_file}"
+                rm -f "${patch_file}"
+            else
+                echo "Keeping modified file: ${patch_file}"
+            fi
+        else
+            echo "Keeping new file: ${patch_file}"
+        fi
+    done
+    find "${PATCH}" -type d -empty -delete
+    if [ ! -d "${PATCH}" ]; then
+        echo "Warning: All files were deleted!"
+    fi
+
 elif [[ "${MODE}" == "build" ]]; then
     SOURCE="$(sanitize_path "${1:-patch}")"
     DESTINATION="$(sanitize_path "${2:-$SOURCE.jar}")"
