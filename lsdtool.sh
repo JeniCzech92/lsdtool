@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -s nullglob
 export LC_ALL=C.UTF-8
 
 if [[ $EUID -eq 0 ]]; then
@@ -12,7 +13,7 @@ SCRIPT_DIR="$(dirname "${REALPATH}")"
 
 JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-pxi3260sr4ifx.zip"
 
-CONTAINER_IMAGE_ID="${SCRIPT_DIR}/utils/.container-image-id"
+DOCKER_IMAGE_ID="${SCRIPT_DIR}/utils/.docker-image-id"
 CONTAINER_IMAGE_RECIPIE="${SCRIPT_DIR}/Dockerfile"
 
 has_long_params() {
@@ -99,31 +100,53 @@ d_exists() {
     fi
 }
 
-# TODO add support for apple containers
-container_prepare() {
+is_wsl() {
+    grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null || \
+    grep -qi 'microsoft' /proc/version 2>/dev/null || \
+    [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]
+}
+
+is_mac() {
+    [[ "$(uname -s)" == "Darwin" ]]
+}
+
+docker_prepare() {
     has_command docker
-    if [[ -e "${CONTAINER_IMAGE_ID}" ]] && [[ "${CONTAINER_IMAGE_RECIPIE}" -ot "${CONTAINER_IMAGE_ID}" ]]; then
+    if [[ -e "${CONTAINER_IMAGE_ID}" ]] && [[ "${CONTAINER_IMAGE_RECIPIE}" -ot "${DOCKER_IMAGE_ID}" ]]; then
         return 0
     fi
 
-    docker build --platform linux/amd64 -f "${CONTAINER_IMAGE_RECIPIE}" --iidfile "${CONTAINER_IMAGE_ID}" .
+    docker build --platform linux/amd64 -f "${CONTAINER_IMAGE_RECIPIE}" --iidfile "${DOCKER_IMAGE_ID}" .
+}
+
+sponge() {
+    local target="${1:-}"
+    if [[ -z "${target}" ]]; then
+        echo "Error: target file path is required" >&2
+        return 1
+    fi
+
+    local data
+    data="$(cat)"
+    echo "${data}" > "${target}"
 }
 
 x86() {
     # Takes parameters as "paths to map" until '--' and treats rest like a command
-    local -a paths=()
+    local -a paths=("-v" "${SCRIPT_DIR}:${SCRIPT_DIR}")
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--" ]]; then
             shift
             break
         else
-            paths+=("-v ${1}:${1}")
+            paths+=("-v")
+            paths+=("${1}:${1}")
             shift
         fi
     done
 
-    if "${CONTENERIZED}"; then
-        docker run --platform linux/amd64 --rm -it ${paths[*]} -v "${SCRIPT_DIR}":/opt/lsdtool --workdir /opt/lsdtool "$(cat "${CONTAINER_IMAGE_ID}")" "${@}"
+    if "${IN_DOCKER}"; then
+        docker run --platform linux/amd64 --rm -it "${paths[@]}" --workdir "${SCRIPT_DIR}" "$(cat "${DOCKER_IMAGE_ID}")" "${@}"
     else
         "${@}"
     fi
@@ -138,11 +161,11 @@ getjdk() {
 
     local target_jdk="${target}/utils/jdk"
     local target_bin="${target_jdk}/bin"
-    if [[ -e "${target_bin}/java" ]] && [[ -e "${target_bin}/javac" ]] && [[ -e "${target_bin}/jar" ]]; then
+    if [[ -e "${target_bin}/javac" ]] && [[ -e "${target_bin}/jar" ]]; then
         return 0
     fi
 
-    if ! "${CONTENERIZED}"; then
+    if ! "${IN_DOCKER}"; then
         has_command patchelf
     fi
     has_command curl
@@ -150,6 +173,7 @@ getjdk() {
 
     local tmp_jdk
     tmp_jdk="$(mktemp)"
+    # shellcheck disable=SC2064
     trap "rm -f '${tmp_jdk}'" RETURN EXIT SIGINT
 
     echo "Downloading 32-bit JDK..."
@@ -200,7 +224,7 @@ sanitize_path() {
         path="./${input}"
     fi
 
-    echo "$path"
+    echo "${path}"
 }
 
 #   confirm_overwrite <file>
@@ -235,11 +259,15 @@ confirm_overwrite() {
 #   cleanup_java <java file>
 cleanup_java() {
     local java_file="$1"
+    if [[ -z "${java_file}" ]]; then
+        echo "Error: java file is required" >&2
+        return 1
+    fi
 
-    echo "Cleanup $java_file"
-    sed -i 's: final : /*final*/ :g' "$java_file"
-    sed -r -i 's:  @Override: // @Override:g' "$java_file"
-    #perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "$java_file"
+    echo "Cleanup ${java_file}"
+    sed -i 's: final : /*final*/ :g' "${java_file}"
+    sed -r -i 's:  @Override: // @Override:g' "${java_file}"
+    #perl -0777 -npi -e 's:    default (.*)\{\n    \}:    /*default*/ \1;:g' "${java_file}"
     # experimental awk variant of the above. Attrocious, but does the job and performs roughly equally well
     awk '
         function rtrim(s){ sub(/[ \t]+$/, "", s); return s }
@@ -272,23 +300,7 @@ cleanup_java() {
           }
           print
         }
-        ' "$java_file" > "$java_file.tmp" && mv "$java_file.tmp" "$java_file"
-}
-
-is_wsl() {
-    # Kernel identifiers
-    if grep -qiE '(microsoft|wsl)' /proc/sys/kernel/osrelease 2>/dev/null; then
-        return 0
-    fi
-    if grep -qi 'microsoft' /proc/version 2>/dev/null; then
-        return 0
-    fi
-
-    # Env hints set by WSL
-    if [[ -n "${WSL_INTEROP:-}" || -n "${WSL_DISTRO_NAME:-}" ]]; then
-        return 0
-    fi
-    return 1
+        ' "${java_file}" | sponge "${java_file}"
 }
 
 checksum() {
@@ -304,11 +316,7 @@ checksum() {
 }
 
 ### Defaults ###
-CONTENERIZED=false
-if [ "$(uname -s)" == "Darwin" ]; then
-    # Enable docker mode by default on MacOS
-    CONTENERIZED=true
-fi
+IN_DOCKER="$(is_mac && echo true || echo false)"
 CLEANUP=true
 MODE=""
 
@@ -361,7 +369,7 @@ while true; do
                 echo "Docker mode is not available on WSL!" >&2
                 exit 1
             fi
-            CONTENERIZED=true
+            IN_DOCKER=true
             shift
             ;;
         --)
@@ -381,7 +389,7 @@ if [[ -z "${MODE}" ]]; then
 fi
 
 ### Install ###
-if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
+if [[ "${MODE}" == "install" ]]; then
     INSTALL_DIR="$HOME/.local/share/lsdtool"
     SYMLINK="$HOME/.local/bin/lsdtool"
     echo "Installing lsdtool to $INSTALL_DIR"
@@ -415,23 +423,20 @@ if [[ "${MODE}" == "install" ]]; then # TODO extract to install.sh?
 fi
 
 ### Preflight checks ###
-if "${CONTENERIZED}"; then
-    container_prepare
+if "${IN_DOCKER}"; then
+    docker_prepare
 fi
 
 getjdk "${SCRIPT_DIR}"
 
-if ! "${CONTENERIZED}"; then
-    has_command java "Please install java." 
+has_command java "Please install java."
+if ! "${IN_DOCKER}"; then
     has_command file
 fi
 
-
-export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
-
 NEEDED_EXECUTABLES=(
-    "${JAVA_HOME}/bin/javac"
-    "${JAVA_HOME}/bin/jar"
+    "${SCRIPT_DIR}/utils/jdk/bin/javac"
+    "${SCRIPT_DIR}/utils/jdk/bin/jar"
     "${SCRIPT_DIR}/utils/JXE2JAR"
 )
 
@@ -471,14 +476,14 @@ if [[ ${#MISSING_X[@]} -gt 0 ]]; then
     esac
 fi
 
-if ! file "${JAVA_HOME}/bin/javac" | grep -q "32-bit"; then
+if ! file "${SCRIPT_DIR}/utils/jdk/bin/javac" | grep -q "32-bit"; then
     echo "Error: cannot recognize javac binary"
     exit 1
 fi
 
-if ! "${CONTENERIZED}" && ! ldd "${JAVA_HOME}/bin/javac" >/dev/null 2>&1; then
+if ! "${IN_DOCKER}" && ! ldd "${SCRIPT_DIR}/utils/jdk/bin/javac" >/dev/null 2>&1; then
     echo "Error: Cannot execute 32-bit javac. Make sure lib32-gcc-libs is installed:"
-    ldd "${JAVA_HOME}/bin/javac" || true
+    ldd "${SCRIPT_DIR}/utils/jdk/bin/javac" || true
     exit 1
 fi
 
@@ -498,8 +503,7 @@ if [[ "${MODE}" == "jxe" ]]; then
       "${SCRIPT_DIR}/utils/JXE2JAR" "${SOURCE}" "${SOURCE_JAR}"
 
     echo "Decompiling ${SOURCE_JAR} -> ${DESTINATION}"
-    x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
-      "java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
+    java -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE_JAR}"
 elif [[ "${MODE}" == "jar" ]]; then
     SOURCE="$(sanitize_path "${1:-lsd.jar}")"
     DESTINATION="$(sanitize_path "${2:-lsd_java}")"
@@ -509,8 +513,7 @@ elif [[ "${MODE}" == "jar" ]]; then
     confirm_overwrite "${DESTINATION}"
 
     echo "Decompiling ${SOURCE} -> ${DESTINATION}"
-    x86 "${SOURCE_DIR}" "${DESTINATION}" -- \
-      "java" -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
+    java -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
 elif [[ "${MODE}" == "copy" ]]; then
 
     # could be a function, but it's so far only use for it, so let's keep it this way for now
@@ -520,7 +523,7 @@ elif [[ "${MODE}" == "copy" ]]; then
         echo "Error: String to match cannot be empty." >&2
         exit 1
     fi
-    
+
     SOURCE="$(sanitize_path "${1:-lsd_java}")"
     DESTINATION="$(sanitize_path "${2:-patch}")"
 
@@ -532,11 +535,11 @@ elif [[ "${MODE}" == "copy" ]]; then
 
     if [ "$(uname -s)" = "Darwin" ]; then # untested on macOS, proceed with caution, test, report issues. Thanks.
         pushd "${SOURCE}" > /dev/null
-        files_to_copy=$( 
+        files_to_copy=$(
             {
                 grep -Rl "${MATCH}" . || :
                 find . -type f -wholename "*${MATCH}*.java"
-            } | sort -u 
+            } | sort -u
         )
         echo "${files_to_copy}" | pax -rw "${DESTINATION}" 2>/dev/null  || :
 
@@ -546,11 +549,11 @@ elif [[ "${MODE}" == "copy" ]]; then
         popd > /dev/null
     else
         pushd "${SOURCE}" > /dev/null
-        files_to_copy=$( 
+        files_to_copy=$(
             {
                 grep -Rl "${MATCH}" . || :
                 find . -type f -wholename "*${MATCH}*.java"
-            } | sort -u 
+            } | sort -u
         )
         echo "${files_to_copy}" | xargs cp --parents -t "${DESTINATION}" 2>/dev/null  || :
         num_copied=$(echo "$files_to_copy" | wc -l)
@@ -606,14 +609,10 @@ elif [[ "${MODE}" == "build" ]]; then
     f_exists "${CLASSPATH}"
     confirm_overwrite "${DESTINATION}"
 
+    FILES=()
     while IFS= read -r file; do
         FILES+=("$file")
     done < <(find "$SOURCE" -type f -name '*.java')
-    if [[ "${CLEANUP:-true}" == true ]]; then
-        for f in "${FILES[@]}"; do
-            cleanup_java "$f"
-        done
-    fi
 
     if "${CLEANUP}"; then
         for f in "${FILES[@]}"; do
@@ -624,7 +623,7 @@ elif [[ "${MODE}" == "build" ]]; then
     for f in "${FILES[@]}"; do
         echo "Compiling ${f}"
         x86 "${SOURCE}" "$(dirname "${CLASSPATH}")" -- \
-          "${JAVA_HOME}/bin/javac" -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "${f}"
+          "${SCRIPT_DIR}/utils/jdk/bin/javac" -source 1.2 -target 1.2 -cp ".:${CLASSPATH}" "${f}"
     done
 
     CLASSES=()
@@ -633,5 +632,5 @@ elif [[ "${MODE}" == "build" ]]; then
     done
 
     x86 "${SOURCE}" "$(dirname "${DESTINATION}")" -- \
-      "${JAVA_HOME}/bin/jar" cvf "${DESTINATION}" "${CLASSES[@]}"
+      "${SCRIPT_DIR}/utils/jdk/bin/jar" cvf "${DESTINATION}" "${CLASSES[@]}"
 fi
