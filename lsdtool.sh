@@ -194,7 +194,7 @@ sanitize_path() {
 
     # Normalize absolute vs relative
     local path
-    if [[ "${input}" = /* ||  "${input}" = ./*  ||  "${input}" = ../* ]]; then
+    if [[ "${input}" = /* || "${input}" = ./* || "${input}" = ../* || "${input}" = ~/* ]]; then
         path="${input}"
     else
         path="./${input}"
@@ -422,12 +422,9 @@ fi
 getjdk "${SCRIPT_DIR}"
 
 if ! "${CONTENERIZED}"; then
-    has_command java "Please install java." # jar in the 32-bit JDK works, so we just need any java to run decompiler
-    # has_command jar "Please install JDK, JRE is nice, but not sufficient."
-    # has_command ldd # we use ldd only on Linux/WSL, and there it is always present.
+    has_command java "Please install java." 
     has_command file
 fi
-# has_command perl "Please install perl." # no longer neccessary
 
 
 export JAVA_HOME="${SCRIPT_DIR}/utils/jdk"
@@ -538,7 +535,7 @@ elif [[ "${MODE}" == "copy" ]]; then
         files_to_copy=$( 
             {
                 grep -Rl "${MATCH}" . || :
-                find . -type f -name "*${MATCH}*.java"
+                find . -type f -wholename "*${MATCH}*.java"
             } | sort -u 
         )
         echo "${files_to_copy}" | pax -rw "${DESTINATION}" 2>/dev/null  || :
@@ -552,7 +549,7 @@ elif [[ "${MODE}" == "copy" ]]; then
         files_to_copy=$( 
             {
                 grep -Rl "${MATCH}" . || :
-                find . -type f -name "*${MATCH}*.java"
+                find . -type f -wholename "*${MATCH}*.java"
             } | sort -u 
         )
         echo "${files_to_copy}" | xargs cp --parents -t "${DESTINATION}" 2>/dev/null  || :
