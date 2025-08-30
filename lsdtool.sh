@@ -194,7 +194,7 @@ sanitize_path() {
 
     # Normalize absolute vs relative
     local path
-    if [[ "${input}" = /* ]]; then
+    if [[ "${input}" = /* ||  "${input}" = ./*  ||  "${input}" = ../* ]]; then
         path="${input}"
     else
         path="./${input}"
