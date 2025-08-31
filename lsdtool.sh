@@ -111,7 +111,7 @@ is_mac() {
 
 docker_prepare() {
     has_command docker
-    if [[ -e "${CONTAINER_IMAGE_ID}" ]] && [[ "${CONTAINER_IMAGE_RECIPIE}" -ot "${DOCKER_IMAGE_ID}" ]]; then
+    if [[ -e "${DOCKER_IMAGE_ID}" ]] && [[ "${CONTAINER_IMAGE_RECIPIE}" -ot "${DOCKER_IMAGE_ID}" ]]; then
         return 0
     fi
 
