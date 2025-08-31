@@ -8,8 +8,7 @@ if [[ $EUID -eq 0 ]]; then
     exit 1
 fi
 
-REALPATH="$(realpath "${0}")"
-SCRIPT_DIR="$(dirname "${REALPATH}")"
+SCRIPT_DIR="$(dirname "$(realpath "${0}")")"
 
 JDK_URL="https://gitlab.com/alelec/mib2-lsd-patching/-/raw/main/ibm-java-ws-sdk-pxi3260sr4ifx.zip"
 
@@ -515,57 +514,44 @@ elif [[ "${MODE}" == "jar" ]]; then
     echo "Decompiling ${SOURCE} -> ${DESTINATION}"
     java -Xmx6g -jar "${SCRIPT_DIR}/utils/cfr-0.152.jar" --previewfeatures false --switchexpression false --outputdir "${DESTINATION}" "${SOURCE}"
 elif [[ "${MODE}" == "copy" ]]; then
-
     # could be a function, but it's so far only use for it, so let's keep it this way for now
-    if [ -n "${3:-}" ]; then
-        MATCH="${3:-}"
-    else
+    if [ -z "${3:-}" ]; then
         echo "Error: String to match cannot be empty." >&2
         exit 1
     fi
 
+    MATCH="${3:-}"
     SOURCE="$(sanitize_path "${1:-lsd_java}")"
     DESTINATION="$(sanitize_path "${2:-patch}")"
 
     d_exists "${SOURCE}"
     confirm_overwrite "${DESTINATION}"
-    DESTINATION="$(realpath "${DESTINATION}")" # we need absolute path later
 
     mkdir -p "${DESTINATION}"
+    DESTINATION_ABS="$(realpath "${DESTINATION}")" # we need absolute path later
 
-    if [ "$(uname -s)" = "Darwin" ]; then # untested on macOS, proceed with caution, test, report issues. Thanks.
-        pushd "${SOURCE}" > /dev/null
-        files_to_copy=$(
-            {
-                grep -Rl "${MATCH}" . || :
-                find . -type f -wholename "*${MATCH}*.java"
-            } | sort -u
-        )
-        echo "${files_to_copy}" | pax -rw "${DESTINATION}" 2>/dev/null  || :
-
-        num_copied=$(echo "$files_to_copy" | wc -l)
-        num_copied=$(echo "$files_to_copy" | grep -cve '^\s*$') || :
-        echo "Copied ${num_copied} file(s) to ${DESTINATION}"
-        popd > /dev/null
+    pushd "${SOURCE}" > /dev/null
+    files_to_copy=$(
+        {
+            grep -Rl "${MATCH}" . || :
+            find . -type f -wholename "*${MATCH}*.java"
+        } | sort -u
+    )
+    if is_mac; then
+        echo "${files_to_copy}" | xargs -L1 -J% rsync -R "%" "${DESTINATION_ABS}" 2>/dev/null  || :
     else
-        pushd "${SOURCE}" > /dev/null
-        files_to_copy=$(
-            {
-                grep -Rl "${MATCH}" . || :
-                find . -type f -wholename "*${MATCH}*.java"
-            } | sort -u
-        )
-        echo "${files_to_copy}" | xargs cp --parents -t "${DESTINATION}" 2>/dev/null  || :
-        num_copied=$(echo "$files_to_copy" | wc -l)
-        num_copied=$(echo "$files_to_copy" | grep -cve '^\s*$') || :
-        echo "Copied ${num_copied} file(s) to ${DESTINATION}"
-        popd > /dev/null
+        echo "${files_to_copy}" | xargs cp --parents -t "${DESTINATION_ABS}" 2>/dev/null  || :
     fi
+    popd > /dev/null
+
+    num_copied=$(echo "$files_to_copy" | wc -l)
+    echo "Copied ${num_copied} file(s) to ${DESTINATION}"
+
 elif [[ "${MODE}" == "trim" ]]; then
     PATCH="$(sanitize_path "${1:-patch}")"
     SOURCE="$(sanitize_path "${2:-lsd_java}")"
 
-    read -p "This will remove all unmodified files in "${PATCH}" directory, are you sure? [y/N]: " answer
+    read -p "This will remove all unmodified files in '${PATCH}' directory, are you sure? [y/N]: " answer
     case "${answer}" in
         [Yy]*) : ;;
         *)
@@ -577,7 +563,7 @@ elif [[ "${MODE}" == "trim" ]]; then
     d_exists "${PATCH}"
     d_exists "${SOURCE}"
 
-    find "$PATCH" -type f -name '*.java' | while read -r patch_file; do
+    find "${PATCH}" -type f -name '*.java' | while read -r patch_file; do
         rel_path="${patch_file#$PATCH/}"
         source_file="${SOURCE}/${rel_path}"
 
