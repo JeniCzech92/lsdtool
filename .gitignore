@@ -97,4 +97,4 @@ Temporary Items
 
 # Additional rules
 /utils/jdk
-/utils/.container-image-id
+/utils/.docker-image-id
