@@ -132,20 +132,21 @@ sponge() {
 
 x86() {
     # Takes parameters as "paths to map" until '--' and treats rest like a command
-    local -a paths=("-v" "${SCRIPT_DIR}:${SCRIPT_DIR}")
+    local -a paths=("-v" "${SCRIPT_DIR}:${SCRIPT_DIR}" "-v" "$(pwd):$(pwd)")
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--" ]]; then
             shift
             break
         else
+            local mapping=$(realpath "${1}")
             paths+=("-v")
-            paths+=("${1}:${1}")
+            paths+=("${mapping}:${mapping}")
             shift
         fi
     done
 
     if "${IN_DOCKER}"; then
-        docker run --platform linux/amd64 --rm -it "${paths[@]}" --workdir "${SCRIPT_DIR}" "$(cat "${DOCKER_IMAGE_ID}")" "${@}"
+        docker run --platform linux/amd64 --rm -it "${paths[@]}" --workdir "$(pwd)" "$(cat "${DOCKER_IMAGE_ID}")" "${@}"
     else
         "${@}"
     fi

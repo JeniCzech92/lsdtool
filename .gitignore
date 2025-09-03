@@ -98,3 +98,6 @@ Temporary Items
 # Additional rules
 /utils/jdk
 /utils/.docker-image-id
+/lsd_java/
+/lsd.jar
+/lsd.jxe

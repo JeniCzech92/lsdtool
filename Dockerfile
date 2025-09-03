@@ -1,5 +1,5 @@
 # Stage 1: Build patchelf from source
-FROM debian:bookworm-slim AS builder
+FROM debian:forky-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -13,7 +13,7 @@ RUN curl -L https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-
 
 
 # Stage 2: Actual runtime image
-FROM debian:bookworm-slim
+FROM debian:forky-slim
 
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
